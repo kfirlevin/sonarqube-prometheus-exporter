@@ -1,5 +1,4 @@
 import requests
-import logging
 from config import Config
 
 # Web API Documentation: http://your-sonarqube-url/web_api
@@ -26,17 +25,42 @@ class SonarExporter:
     def get_all_metrics(self):
         return self._request(endpoint='api/metrics/search')
 
-    def get_measures_component(self, component_key, metric_key):
-        return self._request(endpoint="api/measures/component?component={}&metricKeys={}".format(component_key, metric_key))
+    def get_project_branches(self, project):
+        return self._request(endpoint="api/project_branches/list?project={}".format( project))
+
+    def get_measures_component_by_branch(self, component_key, metric_key,branch):
+        return self._request(endpoint="api/measures/component_tree?component={}&metricKeys={}&branch={}".format(component_key, metric_key,branch))
+
 
 class Project:
 
-    def __init__(self, identifier, key):
-        self.id = identifier
+    def __init__(self, project, key):
+        self.project = project
         self.key = key
-        self._metrics = None
+        self._branches = []
         self._name = None
-        self._organization = None
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+
+    @property
+    def branches(self):
+        return self._branches
+
+    @branches.setter
+    def branches(self, value):
+        self._branches.extend(value)
+
+class Branch:
+
+    def __init__(self, name):
+        self._metrics = []
+        self._name = name
 
     @property
     def name(self):
@@ -52,52 +76,13 @@ class Project:
 
     @metrics.setter
     def metrics(self, value):
-        self._metrics = value
-
-    @property
-    def organization(self):
-        return self._organization
-
-    @organization.setter
-    def organization(self, value):
-        self._organization = value
-
-    def organize_measures(self, metrics : list):
-        metric_obj_list = []
-        for metric in self.metrics['component']['measures']:
-            if 'metric' in metric:
-                m = Metric()
-                tuple_list = []
-                for metric_obj in metrics:
-                    if metric_obj.key == metric['metric']:
-                        m.key = metric_obj.key
-                        m.description = metric_obj.description
-                        m.domain = metric_obj.domain
-                for met_tuples in self.transform_object_in_list_tuple(metric):
-                    if met_tuples[0] == 'metric':
-                        m.key = met_tuples[1]
-                    else:
-                        tuple_list.append(met_tuples)
-                m.values = tuple_list
-            metric_obj_list.append(m)
-        self.metrics = metric_obj_list
-
-    def transform_object_in_list_tuple(self, metric_object):
-        object_list_tuples = []
-        for item in metric_object:
-            if isinstance(metric_object[item], list):
-                for obj in metric_object[item]:
-                    object_list_tuples.extend(self.transform_object_in_list_tuple(metric_object=obj))
-            else:
-                obj_tuple = (str(item), str(metric_object[item]))
-                object_list_tuples.append(obj_tuple)
-        return object_list_tuples
+        self._metrics.extend(value)
 
 class Metric:
 
     def __init__(self):
-        self._key = None
-        self._values = []
+        self._name = None
+        self._value = None
         self._description = None
         self._domain = None
 
@@ -110,12 +95,12 @@ class Metric:
         self._key = value
 
     @property
-    def values(self):
-        return self._values
+    def id(self):
+        return self._id
 
-    @values.setter
-    def values(self, value):
-        self._values.extend(value)
+    @id.setter
+    def id(self, value):
+        self._id = value
 
     @property
     def description(self):
@@ -133,36 +118,67 @@ class Metric:
     def domain(self, value):
         self._domain = value
 
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
 def get_all_projects_with_metrics():
     projects = []
     metrics = []
 
     client = SonarExporter(CONF.sonar_user, CONF.sonar_password)
+    
+    branch_mandatory_list = tuple(CONF.sonar_branch_list.split(','))
     all_projects = client.get_all_projects()
     all_metrics = client.get_all_metrics()
 
+    white_list_domains = ['Reliability','Security','Maintainability','Duplications','Coverage','Size','Issues']
+    black_list_metrics = ['duplications_data','ncloc_language_distribution']
+
     for metric in all_metrics['metrics']:
         m = Metric()
-        for item in CONF.supported_keys:
-            if 'domain' in metric and metric['domain'] in item['domain']:
-                if 'key' in metric and metric['key'] in item['keys']:
-                    m.key = metric['key']
-                    m.domain = metric['domain']
-                    if 'description' in metric:
-                        m.description = metric['description']
-                    metrics.append(m)
+        if 'description' in metric.keys() and metric['domain'] in white_list_domains and metric['key'] not in black_list_metrics:
+            m.id = metric['id']
+            m.description = metric['description']
+            m.key = metric['key']
+            m.domain = metric['domain']
+            metrics.append(m)
 
-    metrics_comma_separated = str()
-    for metric in metrics:
-        if metric.description:
-            metrics_comma_separated = "{},{}".format(metric.key, metrics_comma_separated)
-
+    
     for project in all_projects['components']:
-        p = Project(identifier=project['id'], key=project['key'])
+        p = Project(project=project['project'], key=project['key'])
         p.name = project['name']
-        p.organization = project['organization']
-        p.metrics = client.get_measures_component(component_key=p.key, metric_key=metrics_comma_separated)
-        p.organize_measures(metrics)
-        projects.append(p)
+        branches = client.get_project_branches(project=p.project)
+        branch_list = [b['name'] for b in branches['branches'] if b['name'].startswith(branch_mandatory_list)]
 
-    return projects
+        for branch in branch_list:
+            
+            b = Branch(name=branch)
+            metrics_names = [metric.key for metric in metrics]
+            metrics_chunks = chunks(metrics_names,15)
+            
+            for chunk in metrics_chunks:
+                metric_keys = ','.join(map(str, chunk))
+                measures = client.get_measures_component_by_branch(component_key=p.key,metric_key=metric_keys,branch=branch)
+                
+                for measure in measures['baseComponent']['measures']:
+                    if 'value' in measure.keys():
+                        description = next((x.description for x in metrics if x.description is not None), None)
+                        b.metrics.append({
+                            "metric":measure['metric'],
+                            "value":measure['value'],
+                            "description":description
+                    })
+
+            p.branches.append(b)
+
+
+
+        
+        
+        projects.append(p)
+        return projects
+
+
+get_all_projects_with_metrics()

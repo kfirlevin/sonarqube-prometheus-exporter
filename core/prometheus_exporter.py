@@ -12,31 +12,30 @@ class CustomSonarExporter:
         projects = get_all_projects_with_metrics()
 
         for project in projects:
-            for metric in project.metrics:
-                label_list = ['id', 'key']
-                label_values = []
-                value_to_set = None
+            for branch in project.branches:
+                for metric in branch.metrics:
+                    label_list = ['key', 'name','branch']
+                    label_values = []
+                    value_to_set = None
 
-                label_values.append(project.id)
-                label_values.append(project.key)
-                for metric_value in metric.values:
-                    if metric_value[0] == 'value':
-                        value_to_set = metric_value[1]
-                    else:
-                        label_list.append(metric_value[0])
-                        label_values.append(metric_value[1])
+                    label_values.append(project.key)
+                    label_values.append(project.name)
+                    label_values.append(branch.name)
+                    
+                    
+                    value_to_set = metric['value']
 
-                gauge = GaugeMetricFamily(
-                    name="sonar_{}".format(metric.key),
-                    documentation=metric.description,
-                    labels=label_list
-                )
+                    gauge = GaugeMetricFamily(
+                        name="sonar_{}".format(metric['metric']),
+                        documentation=metric['description'],
+                        labels=label_list
+                    )
 
-                gauge.add_metric(
-                    labels=label_values,
-                    value=value_to_set
-                )
-                yield gauge
+                    gauge.add_metric(
+                        labels=label_values,
+                        value=value_to_set
+                    )
+                    yield gauge
 
 if __name__ == "__main__":
     custom_exporter = CustomSonarExporter()
@@ -44,4 +43,4 @@ if __name__ == "__main__":
     prom.start_http_server(9120)
 
     while True:
-        time.sleep(2)
+        time.sleep(30)
